@@ -381,17 +381,56 @@ export const QUESTION_BANK: Question[] = [
   },
 ];
 
+// ── Mutable runtime data (can be replaced with Sheets data) ──
+
+let _modules: Module[] = MODULES;
+let _questions: Question[] = QUESTION_BANK;
+let _source: 'hardcoded' | 'sheets' = 'hardcoded';
+
+/**
+ * Replace the active question bank with data loaded from Google Sheets.
+ * Falls back silently if the data is empty (keeps hardcoded defaults).
+ */
+export function setQuestionsFromSheets(modules: Module[], questions: Question[]): void {
+  if (modules.length > 0) _modules = modules;
+  if (questions.length > 0) _questions = questions;
+  if (modules.length > 0 || questions.length > 0) _source = 'sheets';
+}
+
+export function getQuestionSource(): string {
+  return _source;
+}
+
+// ── Derived accessors (always read from current _modules / _questions) ──
+
+export function getModules(): Module[] {
+  return _modules;
+}
+
+export function getQuestionBank(): Question[] {
+  return _questions;
+}
+
+export function getModuleIds(): string[] {
+  return _modules.map((m) => m.id);
+}
+
+export function getTechnicalModuleIds(): string[] {
+  return _modules.filter((m) => m.technical).map((m) => m.id);
+}
+
+// Keep static exports for backwards compatibility with tests & imports
 export const MODULE_IDS = MODULES.map((m) => m.id);
 export const TECHNICAL_MODULE_IDS = MODULES.filter((m) => m.technical).map((m) => m.id);
 
 export function getModuleById(moduleId: string): Module | undefined {
-  return MODULES.find((m) => m.id === moduleId);
+  return _modules.find((m) => m.id === moduleId);
 }
 
 export function getQuestionsByModule(moduleId: string): Question[] {
-  return QUESTION_BANK.filter((q) => q.moduleId === moduleId);
+  return _questions.filter((q) => q.moduleId === moduleId);
 }
 
 export function getQuestionById(questionId: string): Question | undefined {
-  return QUESTION_BANK.find((q) => q.id === questionId);
+  return _questions.find((q) => q.id === questionId);
 }

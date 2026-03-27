@@ -43,12 +43,13 @@ async function getSheetsClient() {
 // ── Question Cache ──
 let questionCache = null;
 let questionCacheTime = 0;
-const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ── OAuth verification ──
 const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 async function verifyGoogleToken(token) {
+  // Try ID token verification first (authorization code flow)
   try {
     const ticket = await oauthClient.verifyIdToken({
       idToken: token,
@@ -63,7 +64,26 @@ async function verifyGoogleToken(token) {
       name: payload.name || payload.email,
       sub: payload.sub,
     };
-  } catch (e) {
+  } catch {
+    // Not an ID token — try as access token (implicit flow)
+  }
+
+  // Verify access token via Google's userinfo endpoint
+  try {
+    const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const userInfo = await res.json();
+    if (!userInfo.email?.endsWith(`@${ALLOWED_DOMAIN}`)) {
+      return null;
+    }
+    return {
+      email: userInfo.email,
+      name: userInfo.name || userInfo.email,
+      sub: userInfo.sub || userInfo.email,
+    };
+  } catch {
     return null;
   }
 }
@@ -81,6 +101,84 @@ function requireAuth(req, res, next) {
   });
 }
 
+// ── Transform Sheets rows into app-compatible format ──
+
+function transformModule(row) {
+  return {
+    id: row.id,
+    thresholdPercent: row.gate_percent ? Number(row.gate_percent) : null,
+    technical: row.type === 'technical',
+    title: { pl: row.name_pl || '', en: row.name_en || '' },
+    shortTitle: { pl: deriveShortTitle(row.id, 'pl'), en: deriveShortTitle(row.id, 'en') },
+    description: { pl: '', en: '' }, // Sheets does not store descriptions; frontend fallback handles it
+  };
+}
+
+function deriveShortTitle(moduleId, _lang) {
+  const map = { M1: 'Profil', M2: 'L1', M3: 'L2', M4: 'L3', M5: 'MGR', M6: 'Refleksja' };
+  const mapEn = { M1: 'Profile', M2: 'L1', M3: 'L2', M4: 'L3', M5: 'MGR', M6: 'Reflection' };
+  return _lang === 'en' ? (mapEn[moduleId] || moduleId) : (map[moduleId] || moduleId);
+}
+
+function transformQuestion(row) {
+  const base = {
+    id: row.id,
+    moduleId: row.module_id,
+    type: row.type, // 'single' | 'multi' | 'open'
+    points: Number(row.points) || 0,
+    confidenceEnabled: row.has_confidence === 'TRUE',
+    sourceRef: `Google Sheets / ${row.id}`,
+    prompt: { pl: row.question_pl || '', en: row.question_en || '' },
+  };
+
+  if (row.type === 'open') {
+    return { ...base, placeholder: { pl: '', en: '' } };
+  }
+
+  // Build options array from columns
+  const options = [];
+  const optionIds = ['a', 'b', 'c', 'd', 'e'];
+  for (const letter of optionIds) {
+    const pl = row[`option_${letter}_pl`];
+    const en = row[`option_${letter}_en`];
+    if (pl || en) {
+      options.push({ id: letter.toUpperCase(), text: { pl: pl || '', en: en || '' } });
+    }
+  }
+
+  const question = { ...base, options };
+
+  if (row.type === 'single' && row.correct_answer) {
+    question.correctAnswer = row.correct_answer;
+  }
+
+  return question;
+}
+
+async function fetchQuestionsFromSheets() {
+  const sheets = await getSheetsClient();
+
+  const [modulesRes, questionsRes] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEETS_ID,
+      range: "'Moduły'!A1:Z100",
+    }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEETS_ID,
+      range: "'Pytania'!A1:Z200",
+    }),
+  ]);
+
+  const rawModules = parseSheetToObjects(modulesRes.data.values);
+  const rawQuestions = parseSheetToObjects(questionsRes.data.values)
+    .filter((q) => q.active !== 'FALSE');
+
+  const modules = rawModules.map(transformModule);
+  const questions = rawQuestions.map(transformQuestion);
+
+  return { modules, questions };
+}
+
 // ── GET /api/questions ──
 app.get('/api/questions', async (req, res) => {
   try {
@@ -93,23 +191,7 @@ app.get('/api/questions', async (req, res) => {
       return res.json({ modules: [], questions: [], source: 'fallback' });
     }
 
-    const sheets = await getSheetsClient();
-
-    // Read Modules sheet
-    const modulesRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEETS_ID,
-      range: 'Moduły!A1:Z100',
-    });
-
-    // Read Questions sheet
-    const questionsRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEETS_ID,
-      range: 'Pytania!A1:Z200',
-    });
-
-    const modules = parseSheetToObjects(modulesRes.data.values);
-    const questions = parseSheetToObjects(questionsRes.data.values)
-      .filter((q) => q.active !== 'FALSE');
+    const { modules, questions } = await fetchQuestionsFromSheets();
 
     questionCache = { modules, questions, source: 'sheets', timestamp: now };
     questionCacheTime = now;
@@ -118,6 +200,36 @@ app.get('/api/questions', async (req, res) => {
   } catch (err) {
     console.error('Error fetching questions:', err.message);
     res.status(500).json({ error: 'Failed to fetch questions', details: err.message });
+  }
+});
+
+// ── POST /api/questions/refresh (admin only) ──
+app.post('/api/questions/refresh', requireAuth, async (req, res) => {
+  try {
+    if (!SHEETS_ID) {
+      return res.status(400).json({ error: 'GOOGLE_SHEETS_ID not configured' });
+    }
+
+    // Clear cache
+    questionCache = null;
+    questionCacheTime = 0;
+
+    // Fetch fresh data
+    const { modules, questions } = await fetchQuestionsFromSheets();
+    const now = Date.now();
+
+    questionCache = { modules, questions, source: 'sheets', timestamp: now };
+    questionCacheTime = now;
+
+    res.json({
+      success: true,
+      modulesCount: modules.length,
+      questionsCount: questions.length,
+      timestamp: new Date(now).toISOString(),
+    });
+  } catch (err) {
+    console.error('Error refreshing questions:', err.message);
+    res.status(500).json({ error: 'Failed to refresh questions', details: err.message });
   }
 });
 
@@ -235,14 +347,178 @@ app.get('/api/candidates', requireAuth, async (req, res) => {
       firstName: row.first_name,
       lastName: row.last_name,
       email: row.email,
+      continent: row.continent || '',
+      country: row.country || '',
       classification: row.public_level,
       baseLevel: row.base_level,
+      route: row.route || '',
+      answersJson: row.answers_json || '',
+      assessmentJson: row.assessment_json || '',
     }));
 
     res.json({ candidates });
   } catch (err) {
     console.error('Error fetching candidates:', err.message);
     res.status(500).json({ error: 'Failed to fetch candidates' });
+  }
+});
+
+// ── GET /api/candidates/:sessionId ──
+app.get('/api/candidates/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!SHEETS_ID) {
+      return res.status(404).json({ error: 'No data available' });
+    }
+
+    const sheets = await getSheetsClient();
+
+    // Fetch answers and AI report in parallel
+    const [answersRes, reportRes] = await Promise.all([
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEETS_ID,
+        range: 'Odpowiedzi!A1:Z1000',
+      }),
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEETS_ID,
+        range: "'Raporty AI'!A1:Z1000",
+      }),
+    ]);
+
+    const candidates = parseSheetToObjects(answersRes.data.values || []);
+    const candidate = candidates.find((r) => r.session_id === sessionId);
+
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found', sessionId });
+    }
+
+    const reports = parseSheetToObjects(reportRes.data.values || []);
+    const report = reports.find((r) => r.session_id === sessionId);
+
+    let aiReport = null;
+    if (report && report.report_json) {
+      try {
+        aiReport = JSON.parse(report.report_json);
+      } catch { /* ignore parse errors */ }
+    }
+
+    let answers = {};
+    try {
+      answers = JSON.parse(candidate.answers_json || '{}');
+    } catch { /* ignore */ }
+
+    let assessment = {};
+    try {
+      assessment = JSON.parse(candidate.assessment_json || '{}');
+    } catch { /* ignore */ }
+
+    res.json({
+      timestamp: candidate.timestamp,
+      sessionId: candidate.session_id,
+      firstName: candidate.first_name,
+      lastName: candidate.last_name,
+      email: candidate.email,
+      continent: candidate.continent || '',
+      country: candidate.country || '',
+      classification: candidate.public_level,
+      baseLevel: candidate.base_level,
+      route: candidate.route || '',
+      answers,
+      assessment,
+      aiReport,
+    });
+  } catch (err) {
+    console.error('Error fetching candidate detail:', err.message);
+    res.status(500).json({ error: 'Failed to fetch candidate detail' });
+  }
+});
+
+// ── GET /api/stats ──
+app.get('/api/stats', requireAuth, async (req, res) => {
+  try {
+    if (!SHEETS_ID) {
+      return res.json({ totalCandidates: 0 });
+    }
+
+    const sheets = await getSheetsClient();
+
+    const [answersRes, reportsRes] = await Promise.all([
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEETS_ID,
+        range: 'Odpowiedzi!A1:Z1000',
+      }),
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEETS_ID,
+        range: "'Raporty AI'!A1:Z1000",
+      }),
+    ]);
+
+    const candidates = parseSheetToObjects(answersRes.data.values || []);
+    const reports = parseSheetToObjects(reportsRes.data.values || []);
+
+    // Level breakdown
+    const levelBreakdown = {};
+    for (const c of candidates) {
+      const lvl = c.public_level || 'unknown';
+      levelBreakdown[lvl] = (levelBreakdown[lvl] || 0) + 1;
+    }
+
+    // Module score averages and pass rates
+    const moduleScores = {}; // moduleId -> { totalPercent, totalCount, passCount }
+    for (const c of candidates) {
+      try {
+        const assessment = JSON.parse(c.assessment_json || '{}');
+        const moduleResults = assessment.moduleResults || {};
+        for (const [mid, mr] of Object.entries(moduleResults)) {
+          if (!mr || !mr.technical) continue;
+          if (!moduleScores[mid]) moduleScores[mid] = { totalPercent: 0, count: 0, passCount: 0 };
+          moduleScores[mid].totalPercent += mr.percent || 0;
+          moduleScores[mid].count += 1;
+          if (mr.thresholdMet) moduleScores[mid].passCount += 1;
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    const avgScoresByModule = {};
+    const passRatesByModule = {};
+    for (const [mid, data] of Object.entries(moduleScores)) {
+      avgScoresByModule[mid] = data.count > 0 ? Math.round(data.totalPercent / data.count) : 0;
+      passRatesByModule[mid] = data.count > 0 ? Math.round((data.passCount / data.count) * 100) : 0;
+    }
+
+    // Recommendation breakdown
+    const recommendationBreakdown = {};
+    for (const r of reports) {
+      const rec = r.recommendation || 'unknown';
+      recommendationBreakdown[rec] = (recommendationBreakdown[rec] || 0) + 1;
+    }
+
+    // Recent candidates (last 10)
+    const recentCandidates = candidates
+      .slice(-10)
+      .reverse()
+      .map((c) => ({
+        timestamp: c.timestamp,
+        sessionId: c.session_id,
+        firstName: c.first_name,
+        lastName: c.last_name,
+        email: c.email,
+        classification: c.public_level,
+        baseLevel: c.base_level,
+        route: c.route || '',
+      }));
+
+    res.json({
+      totalCandidates: candidates.length,
+      levelBreakdown,
+      avgScoresByModule,
+      passRatesByModule,
+      recommendationBreakdown,
+      recentCandidates,
+    });
+  } catch (err) {
+    console.error('Error fetching stats:', err.message);
+    res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 

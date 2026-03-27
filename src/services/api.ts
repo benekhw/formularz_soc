@@ -33,10 +33,24 @@ function authHeaders(token: string): Record<string, string> {
 // ── Questions (from Sheets, cached on backend) ──
 export async function fetchQuestions() {
   return fetchJSON<{
-    modules: Record<string, string>[];
-    questions: Record<string, string>[];
+    modules: Array<Record<string, unknown>>;
+    questions: Array<Record<string, unknown>>;
     source: string;
+    timestamp?: number;
   }>('/api/questions');
+}
+
+// ── Refresh question cache (admin only) ──
+export async function refreshQuestionCache(token: string) {
+  return fetchJSON<{
+    success: boolean;
+    modulesCount: number;
+    questionsCount: number;
+    timestamp: string;
+  }>('/api/questions/refresh', {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
 }
 
 // ── Submit Answers ──
@@ -81,7 +95,53 @@ export async function fetchCandidates(token: string) {
       firstName: string;
       lastName: string;
       email: string;
+      continent: string;
+      country: string;
       classification: string;
+      baseLevel: string;
+      route: string;
+      answersJson: string;
+      assessmentJson: string;
     }>;
   }>('/api/candidates', { headers: authHeaders(token) });
+}
+
+// ── Get Candidate Detail ──
+export async function fetchCandidateDetail(sessionId: string, token: string) {
+  return fetchJSON<{
+    timestamp: string;
+    sessionId: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    continent: string;
+    country: string;
+    classification: string;
+    baseLevel: string;
+    route: string;
+    answers: Record<string, unknown>;
+    assessment: Record<string, unknown>;
+    aiReport: import('../types/assessment').AIReport | null;
+  }>(`/api/candidates/${sessionId}`, { headers: authHeaders(token) });
+}
+
+// ── Get Stats (admin dashboard) ──
+export async function fetchStats(token: string) {
+  return fetchJSON<{
+    totalCandidates: number;
+    levelBreakdown: Record<string, number>;
+    avgScoresByModule: Record<string, number>;
+    passRatesByModule: Record<string, number>;
+    recommendationBreakdown: Record<string, number>;
+    recentCandidates: Array<{
+      timestamp: string;
+      sessionId: string;
+      firstName: string;
+      lastName: string;
+      email: string;
+      classification: string;
+      baseLevel: string;
+      route: string;
+    }>;
+  }>('/api/stats', { headers: authHeaders(token) });
 }

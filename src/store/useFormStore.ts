@@ -1,19 +1,12 @@
 import { create } from 'zustand';
 import type { CandidateIdentity } from '../types/identity';
 import type { Assessment } from '../types/assessment';
-import type { AIReport } from '../types/assessment';
 import { deriveAssessment } from '../logic/assessment';
 import { validateModuleAnswers, buildModuleResult } from '../logic/scoring';
 import { determineNextModule, getInitialDiscoveredRoute } from '../logic/routing';
 import { submitAnswers as apiSubmitAnswers } from '../services/api';
 
 export type Phase = 'identity' | 'form' | 'report';
-
-interface AuthState {
-  email: string;
-  token: string;
-  name: string;
-}
 
 interface FormState {
   // Session
@@ -37,28 +30,12 @@ interface FormState {
   assessment: Assessment | null;
   submitting: boolean;
 
-  // Report tabs
-  activeReportTab: 'candidate' | 'recruiter';
-
-  // Auth
-  auth: AuthState | null;
-
-  // AI Report
-  aiReport: AIReport | null;
-  aiReportLoading: boolean;
-  aiReportError: string | null;
-
   // Actions
   setLocale: (l: 'pl' | 'en') => void;
   submitIdentity: (data: CandidateIdentity) => void;
   setAnswer: (questionId: string, answer: Record<string, unknown>) => void;
   submitModule: () => string | null;
   finishForm: () => void;
-  setActiveReportTab: (tab: 'candidate' | 'recruiter') => void;
-  setAuth: (auth: AuthState | null) => void;
-  setAIReport: (report: AIReport | null) => void;
-  setAIReportLoading: (loading: boolean) => void;
-  setAIReportError: (error: string | null) => void;
   resetSession: () => void;
 }
 
@@ -78,11 +55,6 @@ const initialState = {
   validationErrors: {},
   assessment: null,
   submitting: false,
-  activeReportTab: 'candidate' as const,
-  auth: null,
-  aiReport: null,
-  aiReportLoading: false,
-  aiReportError: null,
 };
 
 export const useFormStore = create<FormState>((set, get) => ({
@@ -165,19 +137,10 @@ export const useFormStore = create<FormState>((set, get) => ({
     }
   },
 
-  setActiveReportTab: (tab) => set({ activeReportTab: tab }),
-
-  setAuth: (auth) => set({ auth }),
-
-  setAIReport: (report) => set({ aiReport: report }),
-  setAIReportLoading: (loading) => set({ aiReportLoading: loading }),
-  setAIReportError: (error) => set({ aiReportError: error }),
-
   resetSession: () =>
     set({
       ...initialState,
       sessionId: generateSessionId(),
       locale: get().locale,
-      auth: get().auth,
     }),
 }));
