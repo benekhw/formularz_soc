@@ -108,7 +108,7 @@ export function CandidateCompare() {
                     <span className={mr.thresholdMet ? 'status-pass' : 'status-fail'}>
                       {pct}%
                     </span>
-                    {' '}<span className="muted">({mr.score}/{mr.maxScore})</span>
+                    {' '}<span className="muted">({mr.score as number}/{mr.maxScore as number})</span>
                   </td>
                 );
               })}

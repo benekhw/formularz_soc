@@ -13,8 +13,8 @@ export interface CandidateRow {
   firstName: string;
   lastName: string;
   email: string;
-  continent: string;
-  country: string;
+  continent?: string;
+  country?: string;
   classification: string;
   baseLevel: string;
   route: string;
